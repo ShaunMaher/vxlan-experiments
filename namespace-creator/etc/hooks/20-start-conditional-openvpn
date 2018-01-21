@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+# Ping a "home" IP address with a very limited TTL and wait times
+PINGHOME=$(ping -n -t 2 -c 2 -i 0.2 -W 0.2 -w 0.2 "${HOMEIP}")
+PINGHOMECODE=$?
+
+#TODO: VPN already connected?  Check if working.
+
+if [ $PINGHOMECODE -ne 0 ]; then
+	error "Connect the VPN: TODO: Not implemented!"
+	LOCALBGPIP=$(ip addr show |grep 'inet ' | grep 'tun' | grep -v '127.0.0' | awk '{print $2}')
+
+	return 1 2>/dev/null || exit 1
+else
+	verbose "We are connected to our home network.  VPN not required."
+
+	#TODO: Stop VPN if connected
+fi

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+IFFOUND=0
+NSCOMMANDPREFIX=""
+if [ $(ip link show | grep -c -- "${ACTONINTERFACE}") -gt 0 ]; then
+  verbose "Interface '${ACTONINTERFACE}' is currently in the global namespace."
+  IFFOUND=1
+else
+  while read NS; do
+    if [ $(ip netns exec "${NS}" ip link show | grep -c -- "${ACTONINTERFACE}") -gt 0 ]; then
+      verbose "Interface '${ACTONINTERFACE}' is currently in the '${NS}' namespace."
+      NSCOMMANDPREFIX="ip netns exec \"${NS}\" "
+      IFACECURNS=$NS
+      IFFOUND=1
+    fi
+  done < <(ip netns list | awk 'BEGIN{FS="("}{print $1}')
+fi
+if [ $IFFOUND -lt 1 ]; then
+  error "Unable to find an interface called '${ACTONINTERFACE}' in any namespace."
+  return 1 2>/dev/null || exit 1
+fi
+if [ "${IFACECURNS}" == "${NAMESPACE}" ]; then
+  verbose "Interface '${ACTONINTERFACE}' is already in the '${NAMESPACE}' namespace."
+  return 0 2>/dev/null || exit 0
+fi
+
+IFACECURBRIDGE=""
+while read LINE; do
+  if [ $(echo "${LINE}" | grep -c '^[[:alnum:]]') -gt 0 ]; then
+    BRIDGENAME=$(echo "${LINE}" | awk '{print $1}')
+  fi
+  if [ $(echo "${LINE}" | grep -c -- "${ACTONINTERFACE}\$") -gt 0 ]; then
+    verbose "Interface '${ACTONINTERFACE}' is currently attached to the '${BRIDGENAME}' bridge."
+    IFACECURBRIDGE=$BRIDGENAME
+  fi
+done < <(sh -c "${NSCOMMANDPREFIX} brctl show" | tail +2)
+
+if [ ! "${IFACECURBRIDGE}" == "" ]; then
+  verbose "Removing '${ACTONINTERFACE}' from the '${IFACECURBRIDGE}' bridge."
+  debug $(sh -c "${NSCOMMANDPREFIX} brctl delif \"${IFACECURBRIDGE}\" \"${ACTONINTERFACE}\" 2>&1" 2>&1)
+else
+  verbose "Interface '${ACTONINTERFACE}' is not currently attached to any bridges."
+fi
+
+verbose "Moving interface '${ACTONINTERFACE}' into the '${NAMESPACE}' namespace."
+debug $(sh -c "${NSCOMMANDPREFIX} ip link set \"${ACTONINTERFACE}\" netns \"${NAMESPACE}\" 2>&1" 2>&1)

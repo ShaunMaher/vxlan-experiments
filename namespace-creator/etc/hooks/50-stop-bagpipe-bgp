@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+# Check if bagpipe-bgp is already running.
+#TODO: This code is duplicated in 50-start-bagpipe-bgp
+if [ ! "${NAMESPACE}" == "" ]; then
+	while read PIDFILE; do
+	  while read THISPID; do
+	    if [ $(ps -c "${THISPID}" | grep -c python) -gt 0 ]; then
+	      verbose "Stopping existing instance of bagpipe-bgp with PID '${THISPID}'"
+	      kill $THISPID
+	    fi
+	  done < <(cat "${PIDFILE}")
+	  rm "${PIDFILE}"
+	done < <(find /tmp -maxdepth 2 |grep bagpipe-bgp-${NAMESPACE} | grep '.pid$')
+fi

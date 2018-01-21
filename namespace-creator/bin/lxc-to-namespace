@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+#NOTE: Remember that we can't actually use the "lxc" command if we need to be
+#  able to run as a hook script.  lxc will explode!
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+VETHDEVICE=${1}
+
+# Test data
+VETHDEVICE="vethE25RK3"
+LXC_ROOTFS_PATH="dir:/var/lib/lxd/containers/vxlan-container/rootfs"
+LXC_NAME="sexytimes"
+
+verbose "Preparing to configure host device '${VETHDEVICE}'."
+
+if [ $(echo "${LXC_ROOTFS_PATH}" | grep -c -- '^dir:') -gt 0 ]; then
+  YAMLPATH=$(echo "${LXC_ROOTFS_PATH}" | awk 'BEGIN{FS=":"}{print $2}')
+  YAMLPATH=$(dirname "${YAMLPATH}")"/backup.yaml"
+  if [ ! -e "${YAMLPATH}" ]; then
+    error "Cannot find a 'backup.yaml' file in '"$(dirname "${LXC_ROOTFS_PATH}")"'."
+    return 1 2>/dev/null || exit 1
+  fi
+else
+  error "Sorry, I don't know how to work with this type of LXC_ROOTFS_PATH: '${LXC_ROOTFS_PATH}'."
+  return 1 2>/dev/null || exit 1
+fi
+
+# The following looks unnecessary because we know the name of the veth interface
+#  on the host side that needs to be moved (from the command line argument) and
+#  we could just grep the YAML for volatile.*.hwaddr to get the MAC address.
+#  The problem is that that assumes a single interface.  To be sure we are
+#  operating on ONLY the interface specified on the command line we need to be
+#  able to match the "ethX" in the config file to the veth command line
+#  argument.
+#TODO: Why don't just we match the MAC from volatile.*.hwaddr with the MAC of
+#  ${VETHDEVICE}?
+
+# To get the name of the interface INSIDE the container, we can use the nsenter
+#  command to run a command inside the same network namespace.  We can't just
+#  use "ip netns exec" because the container's network namespace can't be seen
+#  by the "ip netns" command.
+# List PIDs inside the container
+#cat /sys/fs/cgroup/net_cls,net_prio/lxc/<container name>/cgroup.procs
+# Parse the above list looking of a PID that relates to /sbin/init
+# Use PID to enter the container's network namespace
+#nsenter -t <pid of process inside running container> --net ip link list
+
+while read CPID; do
+  if [ $(ps -c "${CPID}" | grep -c -- "init") -gt 0 ]; then
+    CONTINITPID=$CPID
+  fi
+done < <(cat "/sys/fs/cgroup/net_cls,net_prio/lxc/${LXC_NAME}/cgroup.procs")
+verbose "The init process inside the container has a host PID of '${CONTINITPID}'."
+
+while read INDEX; do
+  INSIDENAME=$(cat "${YAMLPATH}" | grep -- "volatile.${INDEX}.name" | uniq | awk 'BEGIN{FS=": "}{print $2}')
+  verbose "The name of the interface referred to as 'volatile.${INDEX}' is '${INSIDENAME}'."
+
+  # Get a list of interfaces inside the namespace, grep for ${INSIDENAME}, get
+  #  the peer interface id from the start of the line which will look like this:
+  #   19: eth0@if20: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000
+  #  We want to get the "20:"
+  PEERIFID=$(nsenter -t $CONTINITPID --net ip -d link list | \
+    grep "${INSIDENAME}" | \
+    awk "BEGIN{FS=\"${INSIDENAME}@\"}{print \$2}" | \
+    awk '{print $1}' | \
+    sed 's/^if//g')
+  verbose "The virtual interface ID of the peer of '${INSIDENAME}' is '"$(echo "${PEERIFID}" | sed 's/://g')"'."
+
+  # Use the "ip -d link list" command outside the guest namespace, grep for the
+  #  line that starts with the ID.  If ${INSIDENAME} is the peer of
+  #  ${VETHDEVICE} then the line should contain "${VETHDEVICE}@"
+  #TODO: Search all namespaces, not just the default
+  if [ $(ip -d link list | grep "^${PEERIFID}" | grep -c -- "${VETHDEVICE}@") -gt 0 ]; then
+    verbose "The peer of '${VETHDEVICE}' is '${INSIDENAME}'."
+    MACADDRESS=$(cat "${YAMLPATH}" | grep "volatile.${INDEX}.hwaddr" | awk 'BEGIN{FS=": "}{print $2}' | tail -1)
+    verbose "The mac address on the host side of '${VETHDEVICE}/${INSIDENAME}' is '${MACADDRESS}'."
+    IFNAMESPACE=$(cat "${YAMLPATH}" | grep "user.net.${INDEX}.host_network_namespace" | awk 'BEGIN{FS=": "}{print $2}' | tail -1)
+    verbose "The interface '${VETHDEVICE}' on the host will be moved into the '${IFNAMESPACE}' namespace."
+    IFIP4ADDRESS=$(cat "${YAMLPATH}" | grep "user.net.${INDEX}.ip4address" | awk 'BEGIN{FS=": "}{print $2}' | tail -1)
+    IFIP4GATEWAY=$(cat "${YAMLPATH}" | grep "user.net.${INDEX}.ip4gateway" | awk 'BEGIN{FS=": "}{print $2}' | tail -1)
+    IFIP4COMMAND=$(cat "${YAMLPATH}" | grep "user.net.${INDEX}.ip4command" | awk 'BEGIN{FS=": "}{print $2}' | tail -1)
+    if [ ! "${IFIP4COMMAND}" == "" ]; then
+      error "Configuration item 'user.net.[].ip4command' is not yet implemented."
+    fi
+
+    verbose "The interface '${INSIDENAME}' will be assigned this IPv4 address: ${IFIP4ADDRESS}."
+
+    #TODO: IPv6 support
+  fi
+done < <(cat "${YAMLPATH}" | grep 'parent:' | uniq | awk 'BEGIN{FS=": "}{print $2}')
+
+#TODO: Sanity check the details we have to make sure the have everything we
+#  need.
+
+# We now have enough information to move the host side interface into the
+#  correct namespace
+I2NS=$(dirname "$(readlink -f $0)")"/interface-to-namespace"; source "${I2NS}" --interface ${VETHDEVICE} --namespace ${IFNAMESPACE}
+
+#TODO: Tell bagpipe-bgp to advertise the MAC/ip address/host combination and to
+#  do it's bridging magic.
+#ip netns exec ${NAMESPACE} bagpipe-rest-attach --attach --port "${VETHDEVICE}" --ip 10.1.1.3/24 --network-type evpn --vpn-instance-id "vxlan${NAMESPACE_VNI}" --rt 64512:100 --mac "${MACADDRESS} --vni ${NAMESPACE_VNI}
+
+#TODO: Configure the IP address inside the container
+
+#TODO: Configure the default gateway inside the container

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+if [ -f /usr/local/etc/network-namespaces/network-namespaces.conf ]; then
+  CONFFILE="/usr/local/etc/network-namespaces/network-namespaces.conf"
+  HOOKSDIR="/usr/local/etc/network-namespaces/hooks/"
+elif [ -f /etc/network-namespaces/network-namespaces.conf ]; then
+  CONFFILE="/etc/network-namespaces/network-namespaces.conf"
+  HOOKSDIR="/etc/network-namespaces/hooks/"
+fi
+
+function error {
+  echo "ERROR: $@" 1>&2
+}
+
+# The hook scripts will likely call this script so they don't need to do all
+#  their init work again.  This function prevents all the init messages being
+#  outputted each time.
+function init_verbose {
+  if [ ${#INITDONE} -lt 1 ]; then
+    verbose "${@}"
+  fi
+}
+function verbose {
+  if [ $VERBOSE_OUTPUT -gt 0 ] || [ $DEBUG_OUTPUT -gt 0 ]; then
+    if [ "${#@}" -gt 0 ]; then
+      echo "V: ${VPREFIX}$@" 1>&2
+    fi
+  else
+    echo "Verbose is off"
+  fi
+}
+
+function debug {
+  if [ $DEBUG_OUTPUT -gt 0 ]; then
+    if [ "${#@}" -gt 0 ]; then
+      echo "D: ${DPREFIX}$@" 1>&2
+    fi
+  fi
+}
+
+function whatsmyip {
+  echo $(wget -q -O- "${WHATSMYIPURL}")
+}
+
+if [ ${#INITDONE} -lt 1 ]; then
+  VERBOSE_OUTPUT=0
+  DEBUG_OUTPUT=0
+fi
+
+if [ ${#NM_DISPATCH} -lt 1 ]; then
+  NM_DISPATCH=0
+fi
+
+if [ $NM_DISPATCH -lt 1 ]; then
+  ARGSTMP=$(getopt -o f:dvnhk:i: --long conf:,conf-file:,debug,verbose,name:,namespace:,namespace-name:,help,hooks:,hooks-dir:,interface: -- "$@")
+  eval set -- "$ARGSTMP"
+  while true; do
+    case "$1" in
+      -f|--conf|--conf-file)
+        CONFFILE="$2"
+        shift 2
+        ;;
+      -n|--name|--namespace|--namespace-name)
+        USENAMESPACE="$2"
+        shift 2
+        ;;
+      -k|--hooks|--hooks-dir)
+        USEHOOKSDIR="$2"
+        shift 2
+        ;;
+      -h|--help)
+        echo "I haven't written the help information yet.  Sorry."
+        exit 0
+        break
+        ;;
+      -i|--interface)
+        ACTONINTERFACE="$2"
+        shift 2
+        ;;
+      -d|--debug)
+        DEBUG_OUTPUT=1
+        shift
+        ;;
+      -v|--verbose)
+        VERBOSE_OUTPUT=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        echo "WTF?"
+        shift
+    esac
+  done
+
+  if [ ! -e "${CONFFILE}" ]; then
+    error "conf-file '${CONFFILE}' does not exist.  Cannot continue."
+    exit 1
+  fi
+  CONFFILE=$(readlink -f "${CONFFILE}")
+  init_verbose "Using config file: '${CONFFILE}'"
+  source "${CONFFILE}"
+
+  # Namespace specified on the command line overrides config file
+  if [ "${USENAMESPACE}" != "" ]; then
+    NAMESPACE="${USENAMESPACE}"
+  fi
+  init_verbose "Operating on namespace: '${NAMESPACE}'"
+
+  # Include config from ${NAMESPACE}.conf if it exists
+  TMPCONF=$(dirname "${CONFFILE}")"/${NAMESPACE}.conf"
+  if [ -e "${TMPCONF}" ]; then
+    init_verbose "Also using config file ${TMPCONF}"
+    source "${TMPCONF}"
+  fi
+
+  # If there is a "hooks" directory stored along side the conf file, use it.
+  TMPHOOKS=$(dirname "${CONFFILE}")"/hooks"
+  if [ -d "${TMPHOOKS}" ]; then
+    HOOKSDIR="${TMPHOOKS}"
+  fi
+  if [ "${USEHOOKSDIR}" != "" ]; then
+    HOOKSDIR="${USEHOOKSDIR}"
+  fi
+  init_verbose "Will use hook scripts found in '${HOOKSDIR}'."
+  INITDONE=$(( $INITDONE + 1 ))
+fi

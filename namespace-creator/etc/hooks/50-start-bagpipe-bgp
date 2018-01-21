@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+# Check if bagpipe-bgp is already running and if so, stop it.
+#TODO: This code is duplicated in 50-stop-bagpipe-bgp
+if [ ! "${NAMESPACE}" == "" ]; then
+	while read PIDFILE; do
+	  while read THISPID; do
+	    if [ $(ps -c "${THISPID}" | grep -c python) -gt 0 ]; then
+	      verbose "Stopping existing instance of bagpipe-bgp with PID '${THISPID}'"
+	      kill $THISPID
+	    fi
+	  done < <(cat "${PIDFILE}")
+	  rm "${PIDFILE}"
+	done < <(find /tmp -maxdepth 2 |grep bagpipe-bgp-${NAMESPACE} | grep '.pid$')
+fi
+
+TMPNAME=$(mktemp /tmp/bagpipe-bgp-${NAMESPACE}-XXXXX)
+PIDFILE="${TMPNAME}.pid"
+BGPCONFFILE="${TMPNAME}.conf"
+verbose "Configuration for this instance of bagpipe-bgp will be written to '${BGPCONFFILE}'."
+
+# Look for a configuration template in various places
+if [ "${BAGPIPECONFTEMPLATE}" == "" ]; then
+  TRYCONFFILE="/etc/network-namespaces/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+  TRYCONFFILE="/usr/local/etc/network-namespaces/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+  TRYCONFFILE="/etc/network-namespaces/${NAMESPACE}/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+  TRYCONFFILE="/usr/local/etc/network-namespaces/${NAMESPACE}/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+  TRYCONFFILE=$(dirname "${CONFFILE}")"/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+  TRYCONFFILE=$(dirname "${CONFFILE}")"/${NAMESPACE}/bgp.conf"
+  if [ -e "${TRYCONFFILE}" ]; then
+    BAGPIPECONFTEMPLATE="${TRYCONFFILE}"
+  fi
+fi
+if [ ! "${BAGPIPECONFTEMPLATE}" == "" ] && [ -e "${BAGPIPECONFTEMPLATE}" ]; then
+  BAGPIPECONFTEMPLATE=$(readlink -f "${BAGPIPECONFTEMPLATE}")
+  verbose "Using bagpipe-bgp configuration template file '${BAGPIPECONFTEMPLATE}'"
+elif [ "${BAGPIPECONFTEMPLATE}" == "" ]; then
+  error "Unable to locate a bagpipe-bgp configuration template file.  bagpipe-bgp will not be started."
+  return 1 2>/dev/null || exit 1
+else
+  error "The specified bagpipe-bgp configuration template file '${BAGPIPECONFTEMPLATE}' was not found.  bagpipe-bgp will not be started."
+  return 1 2>/dev/null || exit 1
+fi
+
+# Automatic detection of the local IP inside the namespace that bagpipe-bgp uses
+#  for something.
+#TODO: We already have this in NS_INTERNAL_IP so why do we need to work it out
+#  at all?
+#TODO: Update comments and messages when you remember that this is for.
+if [ "${LOCALBGPIP}" == "" ]; then
+  verbose "Attempting to automatically detect the IP address that bagpipe-bgp will... something."
+  LOCALBGPIP=$(ip netns exec "${NAMESPACE}" ip addr show |grep 'inet ' | grep -v 'tun' | grep -v '127.0.0' | awk '{print $2}')
+  LOCALBGPIP=$(echo "${LOCALBGPIP}" | awk 'BEGIN{FS="/"}{print $1}')
+  if [ $(echo "${LOCALBGPIP}" | wc -l) -gt 1 ]; then
+    verbose "Found more than one possibly suitable local IP.  Using the first one found even though it's unlikely to be correct."
+    LOCALBGPIP=$(echo "${LOCALBGPIP}" | head -1)
+  fi
+fi
+verbose "bagpipe-bgp will use ${LOCALBGPIP} for... something"
+
+# Automatic detection of the IP address that vxlan data packets should be sent
+#  to
+if [ "${VXLANDATAPLANEIP}" == "" ]; then
+  VXLANDATAPLANEIP=$(whatsmyip)
+fi
+verbose "Will announce '${VXLANDATAPLANEIP}' as the local IP other hosts should send vxlan packets to."
+
+# Create .conf file and set set the basic placeholders
+cat "${BAGPIPECONFTEMPLATE}" | sed -e "s/\${LOCALBGPIP}/${LOCALBGPIP}/" >"${BGPCONFFILE}"
+sed -i -e "s/\${VXLANDATAPLANEIP}/${VXLANDATAPLANEIP}/" "${BGPCONFFILE}"
+
+REMOTEBGPIPS=""
+for BGPIP in $REMOTEBGPIP; do
+	NEWBGPIP=""
+	# If BGPIP is an IP, just add it to the list
+	if [ $(echo "${BGPIP}" | grep -c '^[[:digit:]]') -gt 0 ]; then
+		NEWBGPIP="${NEWBGPIP} ${BGPIP}"
+
+	# If BGPIP is a name, use "host" to get it's IP(s)
+	else
+		while read LINE; do
+			if [ $(echo "${LINE}" | grep -c -e 'has address' -e 'has IPv6 address') -gt 0 ]; then
+				NEWBGPIP="${NEWBGPIP} "$(echo "${LINE}" | awk '{print $NF}')
+			fi
+		done < <(host "${BGPIP}")
+	fi
+
+	NEWBGPIP=$(echo "${NEWBGPIP}" | sed 's/  / /g' | sed 's/^ //g')
+	REMOTEBGPIPS="${REMOTEBGPIPS} ${NEWBGPIP}"
+	REMOTEBGPIPS=$(echo "${REMOTEBGPIPS}" | sed 's/  / /g' | sed 's/^ //g')
+done
+
+sed -i -e "s/\${REMOTEBGPIPS}/${REMOTEBGPIPS}/" "${BGPCONFFILE}"
+
+debug "The following is the generated configuration for bagpipe-bgp:"
+while read LINE; do
+  debug "  ${LINE}"
+done < <(cat "${BGPCONFFILE}")
+
+BGPRESULT=$(ip netns exec "${NAMESPACE}" sh -c "bagpipe-bgp --config-file \"${BGPCONFFILE}\" --use-syslog --debug >/dev/null 2>/dev/null &")
+
+# Get the PID of the running (hopefully) daemon.
+BAGPIPEPID=$(ps aux | grep -v grep | grep "${BGPCONFFILE}" | awk '{print $2}')
+echo "${BAGPIPEPID}" >"${PIDFILE}"
+
+if [ "${BAGPIPEPID}" = "" ]; then
+	error "bagpipe-bgp failed to start.  See syslog for more information."
+	return 1 2>/dev/null || exit 1
+else
+	return 0 2>/dev/null || exit 0
+fi

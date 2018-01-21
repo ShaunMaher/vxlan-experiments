@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+error "Disconnect the VPN: TODO: Not implemented!"
+return 1 2>/dev/null || exit 1

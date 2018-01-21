@@ -1,0 +1,9 @@
+#TODO: This is the basics:
+#NOTE: Remember that we can't actually use the "virsh" command if we need to be
+#  able to run as a hook script.  libvirt will explode!
+#virsh info <container name> | grep veth
+#lxc config show <container name> --expanded | grep 'volatile.*.hwaddr'
+
+I2NS=$(dirname "$(readlink -f $0)")"/interface-to-namespace"; source "${I2NS}" --interface ${TODO}
+
+#bagpipe-rest-attach --attach --port <veth device name> --ip 10.1.1.3/24 --network-type evpn --vpn-instance-id vxlan100 --rt 64512:100 --mac 00:16:3e:6a:cf:ef --vni 100

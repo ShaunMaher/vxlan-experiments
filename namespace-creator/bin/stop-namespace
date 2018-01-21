@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+## Run hook scripts
+while read HOOK; do
+  verbose "Running hook script '"$(basename "${HOOK}")"'."
+  HOOKCMD=""
+  if [ $VERBOSE_OUTPUT -gt 0 ]; then HOOKCMD="${HOOKCMD} --verbose"; fi
+  if [ $DEBUG_OUTPUT -gt 0 ]; then HOOKCMD="${HOOKCMD} --debug"; fi
+  debug "'\"${HOOK}\" --conf-file \"${CONFFILE}\" --namespace \"${NAMESPACE}\" ${HOOKCMD}'"
+
+  # Just a little formatting.  Output from the hook script will be indented 3
+  #  spaces so it's visually different and looks like a child of the last
+  #  non-indented text.
+  ODPREFIX=$DPREFIX; DPREFIX="${ODPREFIX}   "; OVPREFIX=$VPREFIX; VPREFIX="${OVPREFIX}   "
+
+  # Use source to run the hook script in the current context
+  source "${HOOK}" --conf-file "${CONFFILE}" --namespace "${NAMESPACE}" ${HOOKCMD}
+  HOOKRESULT=$?
+
+  # Remove the indent formatting.
+  DPREFIX=${ODPREFIX}; VPREFIX=${OVPREFIX}
+
+  debug "Hook script finished with exit code ${HOOKRESULT}"
+
+  #TODO: Some exit codes should be fatal, some only warnings.
+done < <(find "${HOOKSDIR}" | grep '/[[:digit:]][[:digit:]]-stop' | sort)
+
+## Remove the network veth pair
+if [ $(ip link show |grep -c -- "veth-to-${NAMESPACE}") -gt 0 ]; then
+  verbose "Removing veth pair."
+  debug $(ip link delete "veth-to-${NAMESPACE}" 2>&1)
+fi
+
+##TODO: Remove NAT for namespace
+
+## Remove namespace
+if [ $(ip netns list |grep -c -- "${NAMESPACE}") -gt 0 ]; then
+  verbose "Removing network namespace"
+  debug $(ip netns delete "${NAMESPACE}" 2>&1)
+fi

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+if [ ! "${NAMESPACE}" = "" ]; then
+  ( set -o posix ; set ) | grep -v \
+    -e 'BASHOPTS' \
+    -e 'BASH_' \
+    -e 'SHELL' \
+    -e 'UID' \
+    -e 'PID' \
+    >/tmp/${NAMESPACE}.env
+fi

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+# This script might be called by network manager to announce that an interface
+#  has come up or gone down or that netwoek connectivity has changed.  For this
+#  reason we need to be able to handle arguments as it provides them.  We also
+#  need to be able to understand arguments in the same format as the other
+#  scripts.
+NM_INTERFACE="${1}"
+NM_ACTION="${2}"
+NM_DISPATCH=0
+
+## Configure the host to NAT for the namespace
+function enable_masquerade {
+  verbose "Enabling IP forwarding (i.e. NAT)."
+  debug $(bash -c "echo '1' | sudo tee /proc/sys/net/ipv4/ip_forward" 2>&1 | grep -v '^1$')
+  if [ $(sudo iptables -t nat -nL | grep -- 'MASQUERADE' | grep -c -- "${NS_NETWORK}/${NS_SUBNET}") -gt 0 ]; then
+    verbose "MASQUERADE is already enabled for the ${NS_NETWORK} network."
+  else
+    #TODO: Detect the best network to use if NATEXTERNALINTERFACE="auto"
+
+    verbose "Enabling MASQUERADE for the ${NS_NETWORK} network."
+    debug $(sudo iptables -t nat -A POSTROUTING -s ${NS_NETWORK}/${NS_SUBNET} -o ${NATEXTERNALINTERFACE} -j MASQUERADE 2>&1)
+  fi
+}
+
+case $NM_ACTION in
+  up)
+    echo "Network Manager has advised that ${NM_INTERFACE} has come up"
+    NM_DISPATCH=1
+    ;;
+  down)
+    echo "Network Manager has advised that ${NM_INTERFACE} has gone down"
+    NM_DISPATCH=1
+    ;;
+  vpn-up)
+    echo "Network Manager has advised that VPN connection ${NM_INTERFACE} has come up"
+    NM_DISPATCH=1
+    ;;
+  vpn-down)
+    echo "Network Manager has advised that VPN connection ${NM_INTERFACE} has gone down"
+    NM_DISPATCH=1
+    ;;
+  *)
+    echo "\$2 was '${NM_ACTION}' which doesn't appear to be Network Manager related"
+    ;;
+esac
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+# Force verbose while still in development
+VERBOSE_OUTPUT=1
+
+#TODO: Autodetect the interface to NAT to or pull from config
+NATEXTERNALINTERFACE="wlp2s0"
+
+if [ $NM_DISPATCH -gt 0 ]; then
+  while read ENVFILE; do
+    verbose "Found saved environment '${ENVFILE}'."
+
+    # A basic permissions check since we're about to execute whatever is in this
+    #  file.  It must be owned (user and group) by root.
+    if [ ! $(stat --format="%u" "${ENVFILE}") = "0" ] || [ ! $(stat --format="%g" "${ENVFILE}") = "0" ]; then
+      error "Ignoring saved environment '${ENVFILE}' due to invalid permissions."
+      continue
+    fi
+
+    NAMESPACE=$(basename "${ENVFILE}" | awk 'BEGIN{FS="."}{print $1}')
+
+    # If the namespace in question isn't running we don't need to do anything
+    #  with it.
+    if [ $(ip netns list | grep -c -e "${NAMESPACE}\$" -e "${NAMESPACE} (") -gt 0 ]; then
+      verbose "Namespace ${NAMESPACE} is currently active."
+
+      # Load the saved environment
+      if ! source "${ENVFILE}"; then
+        error "Unable to load saved environment from '${ENVFILE}'.  Unable to enable masquerading for namespace '${NAMESPACE}'."
+        continue
+      fi
+
+      enable_masquerade
+    fi
+  done < <(find /tmp -mindepth 1 -maxdepth 1 | grep '.env$')
+else
+  enable_masquerade
+fi

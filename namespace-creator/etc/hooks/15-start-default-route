@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+verbose "Setting a default route in the ${NAMESPACE} namespace via the ${NAMESPACE}/veth-from-host interface."
+debug $(sudo ip netns exec ${NAMESPACE} ip route add default via ${NS_EXTERNAL_IP} 2>&1)

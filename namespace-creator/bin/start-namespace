@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+## Sanity checks.  Do we have all the tools required?
+if [ "${BAGPIPEBIN}" == "" ]; then
+  BAGPIPEBIN=$(which bagpipe-bgp)
+  if [ "${BAGPIPEBIN}" == "" ]; then
+    error "Cannot find bagpipe-bgp.  Cannot continue."
+    exit 1
+  fi
+fi
+
+## Create a network namespace and a veth pair
+if [ $(ip netns list |grep -c -- "${NAMESPACE}") -gt 0 ]; then
+  verbose "Namespace already exists.  No need to \"ip netns add\""
+else
+  verbose "Adding network namespace."
+  debug $(sudo ip netns add ${NAMESPACE} 2>&1)
+fi
+if [ $(ip link show |grep -c -- "veth-to-${NAMESPACE}") -gt 0 ]; then
+  verbose "veth pair already exists.  No need to \"ip link add\""
+else
+  verbose "Creating veth pair."
+  debug $(sudo ip link add veth-to-${NAMESPACE} type veth peer name veth-from-host 2>&1)
+fi
+if [ $(ip link show |grep -c -- "veth-from-host") -gt 0 ]; then
+  debug $(sudo ip link set veth-from-host netns ${NAMESPACE} 2>&1)
+else
+  if [ $(ip netns exec ${NAMESPACE} ip link show |grep -c -- "veth-from-host") -gt 0 ]; then
+    verbose "veth-from-host interface is already in the namespace."
+  else
+    error "veth-from-host interface isn't in the default namespace or in the \
+      '${NAMESPACE}' namespace.  Maybe the veth pair creation failed.  Cannot\
+      continue."
+    exit 1
+  fi
+fi
+
+## Configure the host side of the veth pair
+verbose "Configuring IP address on veth-to-${NAMESPACE}."
+debug $(sudo ip addr add "${NS_EXTERNAL_IP}/${NS_SUBNET}" dev \
+  veth-to-${NAMESPACE} 2>&1)
+verbose "Bringing up the veth-to-${NAMESPACE} interface"
+debug $(sudo ip link set veth-to-${NAMESPACE} up 2>&1)
+
+#TODO: Are these necessary?  They seem already to exist.
+#sudo iptables -A FORWARD -i wlp2s0 -o veth-to-${NAMESPACE} -j ACCEPT
+#sudo iptables -A FORWARD -o wlp2s0 -i veth-to-${NAMESPACE} -j ACCEPT
+
+## Configure the namespace side of the veth pair
+verbose "Configuring IP address on ${NAMESPACE}/veth-from-host."
+debug $(sudo ip netns exec ${NAMESPACE} ip addr add "${NS_INTERNAL_IP}/${NS_SUBNET}" dev veth-from-host 2>&1)
+verbose "Bringing up the ${NAMESPACE}/veth-from-host interface."
+debug $(sudo ip netns exec ${NAMESPACE} ip link set veth-from-host up 2>&1)
+verbose "Bringing up the ${NAMESPACE}/lo interface."
+debug $(sudo ip netns exec ${NAMESPACE} ip link set lo up 2>&1)
+
+while read HOOK; do
+  verbose "Running hook script '"$(basename "${HOOK}")"'."
+  HOOKCMD=""
+  if [ $VERBOSE_OUTPUT -gt 0 ]; then HOOKCMD="${HOOKCMD} --verbose"; fi
+  if [ $DEBUG_OUTPUT -gt 0 ]; then HOOKCMD="${HOOKCMD} --debug"; fi
+  debug "'\"${HOOK}\" --conf-file \"${CONFFILE}\" --namespace \"${NAMESPACE}\" ${HOOKCMD}'"
+
+  # Just a little formatting.  Output from the hook script will be indented 3
+  #  spaces so it's visually different and looks like a child of the last
+  #  non-indented text.
+  ODPREFIX=$DPREFIX; DPREFIX="${ODPREFIX}   "; OVPREFIX=$VPREFIX; VPREFIX="${OVPREFIX}   "
+
+  # Use source to run the hook script in the current context
+  source "${HOOK}" --conf-file "${CONFFILE}" --namespace "${NAMESPACE}" ${HOOKCMD}
+  HOOKRESULT=$?
+
+  # Remove the indent formatting.
+  DPREFIX=${ODPREFIX}; VPREFIX=${OVPREFIX}
+
+  debug "Hook script finished with exit code ${HOOKRESULT}"
+
+  #TODO: Some exit codes should be fatal, some only warnings.
+done < <(find "${HOOKSDIR}" | grep '/[[:digit:]][[:digit:]]-start' | sort)
+source save-environment

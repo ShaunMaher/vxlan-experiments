@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+# Conf file and parameter handling is done by the common-namespaces script.
+COMMON=$(dirname "$(readlink -f $0)")"/common-namespaces"; source "${COMMON}"
+
+#TODO: This section doesn't work.  More specifically the port forwards created
+#  don't work.  Look at using socat?
+## Forward ports 179/tcp (BGP) 4789/udp and 8472/udp (VXLAN) to the IP inside the namespace
+#sudo iptables -A FORWARD -i wlp2s0 -o veth-to-${NAMESPACE} -p tcp --syn --dport 179 -m conntrack --ctstate NEW -j ACCEPT
+#sudo iptables -A FORWARD -i wlp2s0 -o veth-to-${NAMESPACE} -p udp --dport 4789 -m conntrack --ctstate NEW -j ACCEPT
+#sudo iptables -A FORWARD -i wlp2s0 -o veth-to-${NAMESPACE} -p udp --dport 8472 -m conntrack --ctstate NEW -j ACCEPT
